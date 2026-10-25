@@ -68,6 +68,7 @@ Extracts and enriches duplicate-geometry entity matches flagged by expectation c
 - Enriches each matched entity pair (A/B) with name, dates, geometry and organisation from the relevant dataset's parquet file
 - Looks up organisation references via each dataset's pipeline lookup file, and flags whether the two matched entities belong to the same organisation
 - Flags whether entity B's organisation is part of the open-digital-planning (ODP) project
+- Flags (`entity_a_out_of_bounds`, `entity_b_out_of_bounds`) whether each entity is outside its own organisation's local planning authority boundary, from the `count_lpa_boundary` expectation results. `True` = outside, `False` = the organisation has a boundary result and the entity is not in it, blank = no boundary result for that organisation (unknown). The check uses `not_intersects`, so an entity that only touches the boundary is `False`. Consumers should treat blank as unknown, not as in bounds.
 
 **Outputs:**
 

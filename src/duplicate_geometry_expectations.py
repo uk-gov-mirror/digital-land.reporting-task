@@ -1,5 +1,6 @@
 import pandas as pd
 import ast
+import json
 import argparse
 import os
 import logging
@@ -33,6 +34,62 @@ def parse_details(val):
         return ast.literal_eval(val)
     except Exception:
         return {}
+
+
+def parse_out_of_bounds(df_bounds):
+    """Read count_lpa_boundary expectation results.
+
+    Returns (checked, out_of_bounds):
+    - checked: {(dataset, organisation_entity)} that have a boundary result at all.
+    - out_of_bounds: {(dataset, entity)} recorded as outside their organisation's local
+      planning authority boundary.
+
+    The raw expectation table is used (not task.csv), as each result lists the offending
+    entities: details.entities / details.failures.
+    """
+    checked = set()
+    out_of_bounds = set()
+    for _, row in df_bounds.iterrows():
+        dataset = row["dataset"]
+        try:
+            organisation_entity = int(json.loads(row["parameters"]).get("organisation_entity"))
+        except Exception:
+            organisation_entity = None
+        details = parse_details(row["details"]) or {}
+        failures = details.get("failures") or []
+        if organisation_entity is None and failures:
+            try:
+                organisation_entity = int(failures[0].get("organisation_entity"))
+            except Exception:
+                organisation_entity = None
+        if organisation_entity is not None:
+            checked.add((dataset, organisation_entity))
+        for entity in details.get("entities") or []:
+            out_of_bounds.add((dataset, int(entity)))
+    return checked, out_of_bounds
+
+
+def add_out_of_bounds_flags(df_matches, checked, out_of_bounds):
+    """Add entity_a_out_of_bounds / entity_b_out_of_bounds.
+
+    True: the entity is outside its organisation's LPA boundary (count_lpa_boundary).
+    False: the organisation has a boundary result and the entity is not in it.
+    Blank: no boundary result for that organisation, so unknown.
+    Note count_lpa_boundary uses not_intersects, so an entity that touches the boundary is False.
+    """
+    for side in ("a", "b"):
+        flags = []
+        for dataset, organisation, entity in zip(
+            df_matches["dataset"],
+            df_matches[f"entity_{side}_organisation"],
+            df_matches[f"entity_{side}"],
+        ):
+            if pd.isna(organisation) or pd.isna(entity) or (dataset, int(organisation)) not in checked:
+                flags.append(pd.NA)
+            else:
+                flags.append((dataset, int(entity)) in out_of_bounds)
+        df_matches[f"entity_{side}_out_of_bounds"] = pd.array(flags, dtype="boolean")
+    return df_matches
 
 
 def main(output_dir: str):
@@ -293,6 +350,22 @@ def main(output_dir: str):
         df_matches["in_odp"] = False
 
     # ------------------------------------------------------------
+    # Flag entities outside their organisation's LPA boundary
+    # ------------------------------------------------------------
+    # Lets consumers tell which of several duplicates is in the right place. Unknown (blank)
+    # if the boundary results cannot be loaded, which consumers must not treat as in bounds.
+    try:
+        df_bounds = fetch_datasette_csv_table(
+            "expectation", filters={"operation__exact": "count_lpa_boundary"}, low_memory=False
+        )
+        checked, out_of_bounds = parse_out_of_bounds(df_bounds)
+        df_matches = add_out_of_bounds_flags(df_matches, checked, out_of_bounds)
+    except Exception as e:
+        logger.error(f"Failed to load LPA boundary expectation results: {e}")
+        df_matches["entity_a_out_of_bounds"] = pd.array([pd.NA] * len(df_matches), dtype="boolean")
+        df_matches["entity_b_out_of_bounds"] = pd.array([pd.NA] * len(df_matches), dtype="boolean")
+
+    # ------------------------------------------------------------
     # Final column order (only keep those that exist)
     # ------------------------------------------------------------
     ordered = [
@@ -318,7 +391,9 @@ def main(output_dir: str):
         "lookup_org_a",
         "lookup_org_b",
         "lookup_same_org",
-        "in_odp"
+        "in_odp",
+        "entity_a_out_of_bounds",
+        "entity_b_out_of_bounds",
     ]
     ordered = [c for c in ordered if c in df_matches.columns]
     df_matches = df_matches[ordered].copy()
